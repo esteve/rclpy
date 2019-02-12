@@ -25,6 +25,7 @@
 #include <rcl_interfaces/msg/parameter_type__struct.h>
 #include <rcutils/allocator.h>
 #include <rcutils/format_string.h>
+#include <rcutils/logging_macros.h>
 #include <rcutils/strdup.h>
 #include <rcutils/types.h>
 #include <rmw/error_handling.h>
@@ -2209,6 +2210,59 @@ rclpy_wait_set_init(PyObject * Py_UNUSED(self), PyObject * args)
   Py_RETURN_NONE;
 }
 
+/// Resize a wait set
+/**
+ * Raises RuntimeError if the wait set could not be resized
+ *
+ * \param[in] pywait_set Capsule pointing to the wait set structure
+ * \param[in] number_of_subscriptions int
+ * \param[in] number_of_guard_conditions int
+ * \param[in] number_of_timers int
+ * \param[in] number_of_clients int
+ * \param[in] number_of_services int
+ * \return None
+ */
+static PyObject *
+rclpy_wait_set_resize(PyObject * Py_UNUSED(self), PyObject * args)
+{
+  PyObject * pywait_set;
+  unsigned PY_LONG_LONG number_of_subscriptions;
+  unsigned PY_LONG_LONG number_of_guard_conditions;
+  unsigned PY_LONG_LONG number_of_timers;
+  unsigned PY_LONG_LONG number_of_clients;
+  unsigned PY_LONG_LONG number_of_services;
+  PyObject * pycontext;
+
+  if (!PyArg_ParseTuple(
+      args, "OKKKKKO", &pywait_set, &number_of_subscriptions,
+      &number_of_guard_conditions, &number_of_timers,
+      &number_of_clients, &number_of_services, &pycontext))
+  {
+    return NULL;
+  }
+
+  rcl_wait_set_t * wait_set = (rcl_wait_set_t *)PyCapsule_GetPointer(pywait_set, "rcl_wait_set_t");
+  if (!wait_set) {
+    return NULL;
+  }
+
+  rcl_context_t * context = (rcl_context_t *)PyCapsule_GetPointer(pycontext, "rcl_context_t");
+  if (NULL == context) {
+    return NULL;
+  }
+
+  rcl_ret_t ret = rcl_wait_set_resize(
+    wait_set, number_of_subscriptions, number_of_guard_conditions, number_of_timers,
+    number_of_clients, number_of_services);
+  if (ret != RCL_RET_OK) {
+    PyErr_Format(PyExc_RuntimeError,
+      "Failed to resize wait set: %s", rcl_get_error_string().str);
+    rcl_reset_error();
+    return NULL;
+  }
+  Py_RETURN_NONE;
+}
+
 /// Clear all the pointers in the wait set
 /**
  * Raises RuntimeError if any rcl error occurs
@@ -2481,16 +2535,32 @@ static PyObject *
 rclpy_wait(PyObject * Py_UNUSED(self), PyObject * args)
 {
   PyObject * pywait_set;
+  PyObject * pyguard_condition;
   PY_LONG_LONG timeout = -1;
 
-  if (!PyArg_ParseTuple(args, "O|K", &pywait_set, &timeout)) {
+  if (!PyArg_ParseTuple(args, "OO|K", &pywait_set, &pyguard_condition, &timeout)) {
     return NULL;
   }
   rcl_wait_set_t * wait_set = (rcl_wait_set_t *)PyCapsule_GetPointer(pywait_set, "rcl_wait_set_t");
   if (!wait_set) {
     return NULL;
   }
+  rcl_guard_condition_t * guard_condition = (rcl_guard_condition_t *)PyCapsule_GetPointer(
+    pyguard_condition, "rcl_guard_condition_t");
+  if (!guard_condition) {
+    return NULL;
+  }
+
   rcl_ret_t ret;
+  size_t rcl_wait_guard_condition_index = 0u;
+
+  if (rcl_wait_set_add_guard_condition(wait_set, guard_condition, &rcl_wait_guard_condition_index) != RCL_RET_OK) {
+    RCUTILS_LOG_ERROR_NAMED(
+      "rclpy",
+      "Couldn't add guard_condition to wait set: %s",
+      rcl_get_error_string().str);
+    return NULL;
+  }
 
   // Could be a long wait, release the GIL
   Py_BEGIN_ALLOW_THREADS;
@@ -4347,6 +4417,11 @@ static PyMethodDef rclpy_methods[] = {
   {
     "rclpy_wait_set_init", rclpy_wait_set_init, METH_VARARGS,
     "rclpy_wait_set_init."
+  },
+
+  {
+    "rclpy_wait_set_resize", rclpy_wait_set_resize, METH_VARARGS,
+    "rclpy_wait_set_resize."
   },
 
   {

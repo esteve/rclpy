@@ -64,11 +64,16 @@ if TYPE_CHECKING:
 class _WaitSet:
     """Make sure the wait set gets destroyed when a generator exits."""
 
+    def __init__(self, context_handle):
+        self.context_handle = context_handle
+
     def __enter__(self):
         self.wait_set = _rclpy.rclpy_get_zero_initialized_wait_set()
-        return self.wait_set
+        self.guard_condition = _rclpy.rclpy_create_guard_condition(self.context_handle)[0]
+        return self.wait_set, self.guard_condition
 
     def __exit__(self, t, v, tb):
+        _rclpy.rclpy_destroy_entity(self.guard_condition)
         _rclpy.rclpy_destroy_wait_set(self.wait_set)
 
 
@@ -438,8 +443,14 @@ class Executor:
                 entity_count += waitable.get_num_entities()
 
             # Construct a wait set
-            with _WaitSet() as wait_set:
+            with _WaitSet(self._context.handle) as (wait_set, guard_condition):
                 _rclpy.rclpy_wait_set_init(
+                    wait_set, 0, 1, 0, 0, 0, self._context.handle)
+                _rclpy.rclpy_wait_set_add_entity('guard_condition', wait_set, guard_condition)
+                _rclpy.rclpy_wait(wait_set, -1)
+                _rclpy.rclpy_wait_set_clear_entities(wait_set)
+
+                _rclpy.rclpy_wait_set_resize(
                     wait_set,
                     entity_count.num_subscriptions,
                     entity_count.num_guard_conditions,
@@ -471,7 +482,7 @@ class Executor:
                         'guard_condition', wait_set, self._guard_condition)
 
                     # Wait for something to become ready
-                    _rclpy.rclpy_wait(wait_set, timeout_nsec)
+                    _rclpy.rclpy_wait(wait_set, guard_condition, timeout_nsec)
 
                     # get ready entities
                     subs_ready = _rclpy.rclpy_get_ready_entities('subscription', wait_set)
